@@ -1,7 +1,7 @@
 import psycopg2
 
 conn = psycopg2.connect(
-    dbname="exam_planning",
+    dbname="num_exam",
     user="postgres",
     password="lyna2003",
     host="localhost",

@@ -1,162 +1,295 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from backend.config import DB_CONFIG
-
-
-# =====================================
-# DATABASE CONNECTION
-# =====================================
+from datetime import datetime
 
 def get_connection():
-    """
-    Creates and returns a new PostgreSQL connection
-    """
     return psycopg2.connect(
-        dbname=DB_CONFIG["dbname"],       # was DB_CONFIG["exam_planning"]
-        user=DB_CONFIG["user"],           # was DB_CONFIG["postgres"]
-        password=DB_CONFIG["password"],   # was DB_CONFIG["lyna2003"]
-        host=DB_CONFIG["host"],           # was DB_CONFIG["localhost"]
-        port=DB_CONFIG["port"]            # was DB_CONFIG["5432"]
+        dbname=DB_CONFIG["dbname"],
+        user=DB_CONFIG["user"],
+        password=DB_CONFIG["password"],
+        host=DB_CONFIG["host"],
+        port=DB_CONFIG["port"]
     )
 
 # =====================================
-# FETCH FUNCTIONS
+# LOGIN FUNCTIONS (PLAIN PASSWORD - TESTING)
 # =====================================
+
+def validate_staff_login(email, password):
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    cur.execute("""
+        SELECT 
+            id,
+            nom,
+            prenom,
+            role,
+            departement_id
+        FROM staff
+        WHERE email = %s AND password = %s
+    """, (email, password))
+
+    user = cur.fetchone()
+    cur.close()
+    conn.close()
+    return user
+
+# ---------- STUDENT LOGIN ----------
+
+def validate_student_login(matricule, date_naissance):
+    """
+    Student login using matricule + date_naissance (YYYY-MM-DD)
+    """
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    cur.execute("""
+        SELECT id, nom, prenom, formation_id
+        FROM etudiants
+        WHERE matricule = %s
+          AND date_naissance = %s
+    """, (matricule, date_naissance))
+
+    student = cur.fetchone()
+    cur.close()
+    conn.close()
+    return student
+
+# ---------- PROFESSOR LOGIN ----------
+
+def validate_prof_login(email, password):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, nom, prenom, departement_id
+        FROM professeurs
+        WHERE email = %s AND password = %s
+    """, (email, password))
+
+    row = cur.fetchone()
+    conn.close()
+
+    if row:
+        return {
+            "id": row[0],
+            "nom": row[1],
+            "prenom": row[2],
+            "departement_id": row[3],
+            "role": "prof"
+        }
+
+    return None
+
+
+# ---------- EXAM FETCH ----------
+def fetch_student_schedule(student_id):
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT e.id, m.nom AS module, f.nom AS formation, s.nom AS salle, e.date_exam, e.heure_debut, e.duree_minutes
+        FROM inscriptions i
+        JOIN examens e ON i.module_id=e.module_id
+        JOIN modules m ON i.module_id=m.id
+        JOIN formations f ON m.formation_id=f.id
+        JOIN salles s ON e.salle_id=s.salle_id
+        WHERE i.etudiant_id=%s
+        ORDER BY e.date_exam, e.heure_debut
+    """, (student_id,))
+    data = cur.fetchall()
+    cur.close()
+    conn.close()
+    return data
+
+def fetch_prof_schedule(prof_id):
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT e.id, m.nom AS module, f.nom AS formation, s.nom AS salle, e.date_exam, e.heure_debut, e.duree_minutes
+        FROM examens e
+        JOIN modules m ON e.module_id=m.id
+        JOIN formations f ON m.formation_id=f.id
+        JOIN salles s ON e.salle_id=s.salle_id
+        WHERE e.prof_id=%s
+        ORDER BY e.date_exam, e.heure_debut
+    """, (prof_id,))
+    data = cur.fetchall()
+    cur.close()
+    conn.close()
+    return data
+
+def fetch_department_schedule(department_id):
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT e.id AS exam_id, m.nom AS module_name, f.nom AS formation_name, f.id AS formation_id,
+               f.departement_id, f.approved AS formation_approved,
+               s.nom AS room_name, s.capacite AS room_capacity,
+               p.nom || ' ' || p.prenom AS professor_name,
+               e.date_exam, e.heure_debut, e.duree_minutes
+        FROM examens e
+        JOIN modules m ON e.module_id=m.id
+        JOIN formations f ON m.formation_id=f.id
+        JOIN salles s ON e.salle_id=s.salle_id
+        JOIN professeurs p ON e.prof_id=p.id
+        WHERE f.departement_id=%s
+        ORDER BY e.date_exam, e.heure_debut
+    """, (department_id,))
+    data = cur.fetchall()
+    cur.close()
+    conn.close()
+    return data
+
+def approve_department_schedule(department_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE formations SET approved=TRUE WHERE departement_id=%s", (department_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
+
+def fetch_all_departments_schedule():
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT e.id AS exam_id, m.nom AS module_name, f.nom AS formation_name,
+               f.departement_id, s.nom AS room_name, p.nom || ' ' || p.prenom AS professor_name,
+               e.date_exam, e.heure_debut, e.duree_minutes, f.approved AS formation_approved
+        FROM examens e
+        JOIN modules m ON e.module_id=m.id
+        JOIN formations f ON m.formation_id=f.id
+        JOIN salles s ON e.salle_id=s.salle_id
+        JOIN professeurs p ON e.prof_id=p.id
+        ORDER BY f.departement_id, e.date_exam, e.heure_debut
+    """)
+    data = cur.fetchall()
+    cur.close()
+    conn.close()
+    return data
+
+def approve_final_schedule():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE formations SET approved=TRUE")
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
+
+#---------- FETCH FORMATIONS ----------
 
 def fetch_formations():
-    """
-    Returns all formations
-    """
+    """Return all formations from the database"""
     conn = get_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
-
-    cur.execute("SELECT * FROM formations;")
-    data = cur.fetchall()
-
+    cur.execute("SELECT * FROM formations ORDER BY nom")
+    formations = cur.fetchall()
     cur.close()
     conn.close()
-    return data
+    return formations
 
 
-def fetch_modules_by_formation(formation_id):
-    """
-    Returns modules of a given formation
-    """
+# Optional admin dashboard
+def fetch_admin_dashboard_data():
     conn = get_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
-
     cur.execute("""
-        SELECT * FROM modules
-        WHERE formation_id = %s
-    """, (formation_id,))
-
-    data = cur.fetchall()
-    cur.close()
-    conn.close()
-    return data
-
-
-def fetch_students_by_formation(formation_id):
-    """
-    Returns students enrolled in a formation
-    """
-    conn = get_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-
+        SELECT s.nom AS salle, COUNT(e.id) AS nb_examens, SUM(s.capacite) AS total_capacity
+        FROM salles s
+        LEFT JOIN examens e ON s.salle_id=e.salle_id
+        GROUP BY s.nom
+        ORDER BY nb_examens DESC
+    """)
+    rooms = cur.fetchall()
     cur.execute("""
-        SELECT * FROM etudiants
-        WHERE formation_id = %s
-    """, (formation_id,))
-
-    data = cur.fetchall()
+        SELECT p.nom || ' ' || p.prenom AS professeur, COUNT(e.id) AS nb_examens
+        FROM professeurs p
+        LEFT JOIN examens e ON p.id=e.prof_id
+        GROUP BY p.id
+        ORDER BY nb_examens DESC
+    """)
+    professors = cur.fetchall()
+    cur.execute("""
+        SELECT st.nom || ' ' || st.prenom AS student, e1.date_exam, e1.heure_debut, COUNT(*) AS nb_conflicts
+        FROM inscriptions i1
+        JOIN examens e1 ON i1.module_id=e1.module_id
+        JOIN inscriptions i2 ON i1.etudiant_id=i2.etudiant_id
+        JOIN examens e2 ON i2.module_id=e2.module_id
+        JOIN etudiants st ON i1.etudiant_id=st.id
+        WHERE e1.id<>e2.id AND e1.date_exam=e2.date_exam AND e1.heure_debut=e2.heure_debut
+        GROUP BY st.id, e1.date_exam, e1.heure_debut
+        HAVING COUNT(*)>1
+        ORDER BY nb_conflicts DESC
+    """)
+    student_conflicts = cur.fetchall()
     cur.close()
     conn.close()
-    return data
+    return {"rooms": rooms, "professors": professors, "student_conflicts": student_conflicts}
 
-
-def fetch_professors():
-    """
-    Returns all professors
-    """
-    conn = get_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-
-    cur.execute("SELECT * FROM professeurs;")
-    data = cur.fetchall()
-
-    cur.close()
-    conn.close()
-    return data
-
-
-def fetch_rooms():
-    """
-    Returns all rooms
-    """
-    conn = get_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-
-    cur.execute("SELECT * FROM salles;")
-    data = cur.fetchall()
-
-    cur.close()
-    conn.close()
-    return data
-
-
-# =====================================
-# EXAMS MANAGEMENT
-# =====================================
 
 def clear_existing_exams():
     """
-    Deletes all exams before regeneration
+    Delete all existing exams before regenerating a new schedule
     """
     conn = get_connection()
     cur = conn.cursor()
-
     cur.execute("DELETE FROM examens;")
     conn.commit()
-
     cur.close()
     conn.close()
 
+#---------- FETCH MODULES AND STUDENTS BY FORMATION ----------
 
-def insert_exam(module_id, prof_id, salle_id, date_exam, heure_debut, duree):
-    """
-    Inserts a single exam into database
-    """
+def fetch_modules_by_formation(formation_id):
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT id, nom, departement_id
+        FROM modules
+        WHERE formation_id = %s
+    """, (formation_id,))
+    modules = cur.fetchall()
+    cur.close()
+    conn.close()
+    return modules
+
+def fetch_students_by_formation(formation_id):
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM etudiants WHERE formation_id=%s", (formation_id,))
+    students = cur.fetchall()
+    cur.close()
+    conn.close()
+    return students
+
+def fetch_rooms():
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT salle_id, nom, capacite FROM salles")  # id here
+    rooms = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rooms
+
+def fetch_professors():
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM professeurs ORDER BY nom")
+    professors = cur.fetchall()
+    cur.close()
+    conn.close()
+    return professors
+
+def insert_exam(module_id, salle_id, prof_id, date_exam, heure_debut, duree_minutes):
     conn = get_connection()
     cur = conn.cursor()
-
     cur.execute("""
-        INSERT INTO examens
-        (module_id, prof_id, salle_id, date_exam, heure_debut, duree_minutes)
+        INSERT INTO examens (module_id, salle_id, prof_id, date_exam, heure_debut, duree_minutes)
         VALUES (%s, %s, %s, %s, %s, %s)
-    """, (module_id, prof_id, salle_id, date_exam, heure_debut, duree))
-
+    """, (module_id, salle_id, prof_id, date_exam, heure_debut, duree_minutes))
     conn.commit()
     cur.close()
     conn.close()
-
-
-def fetch_all_exams():
-    """
-    Returns all scheduled exams
-    """
-    conn = get_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-
-    cur.execute("""
-        SELECT e.id, m.nom AS module, s.nom AS salle,
-               e.date_exam, e.heure_debut, e.duree_minutes
-        FROM examens e
-        JOIN modules m ON e.module_id = m.id
-        JOIN salles s ON e.salle_id = s.id
-        ORDER BY e.date_exam, e.heure_debut
-    """)
-
-    data = cur.fetchall()
-    cur.close()
-    conn.close()
-    return data

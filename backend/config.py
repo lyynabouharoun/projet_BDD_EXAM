@@ -1,5 +1,5 @@
 DB_CONFIG = {
-    "dbname": "exam_planning",
+    "dbname": "num_exam",
     "user": "postgres",
     "password": "lyna2003",
     "host": "localhost",
