@@ -89,14 +89,22 @@ def fetch_student_schedule(student_id):
     conn = get_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute("""
-        SELECT e.id, m.nom AS module, f.nom AS formation, s.nom AS salle, e.date_exam, e.heure_debut, e.duree_minutes
-        FROM inscriptions i
-        JOIN examens e ON i.module_id=e.module_id
-        JOIN modules m ON i.module_id=m.id
-        JOIN formations f ON m.formation_id=f.id
-        JOIN salles s ON e.salle_id=s.salle_id
-        WHERE i.etudiant_id=%s
-        ORDER BY e.date_exam, e.heure_debut
+        SELECT
+    ex.id,
+    m.nom AS module,
+    f.nom AS formation,
+    s.nom AS salle,
+    ex.date_exam,
+    ex.heure_debut,
+    ex.duree_minutes
+FROM exam_groups eg
+JOIN examens ex ON eg.exam_id = ex.id
+JOIN modules m ON ex.module_id = m.id
+JOIN formations f ON m.formation_id = f.id
+JOIN salles s ON ex.salle_id = s.salle_id
+WHERE eg.student_id = %s
+ORDER BY ex.date_exam, ex.heure_debut;
+
     """, (student_id,))
     data = cur.fetchall()
     cur.close()
@@ -244,17 +252,18 @@ def clear_existing_exams():
 #---------- FETCH MODULES AND STUDENTS BY FORMATION ----------
 
 def fetch_modules_by_formation(formation_id):
-    conn = get_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("""
-        SELECT id, nom, departement_id
-        FROM modules
-        WHERE formation_id = %s
-    """, (formation_id,))
-    modules = cur.fetchall()
-    cur.close()
-    conn.close()
-    return modules
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT 
+                    m.id,
+                    m.nom,
+                    f.departement_id
+                FROM modules m
+                JOIN formations f ON m.formation_id = f.id
+                WHERE m.formation_id = %s
+            """, (formation_id,))
+            return cur.fetchall()
 
 def fetch_students_by_formation(formation_id):
     conn = get_connection()
@@ -283,13 +292,69 @@ def fetch_professors():
     conn.close()
     return professors
 
-def insert_exam(module_id, salle_id, prof_id, date_exam, heure_debut, duree_minutes):
-    conn = get_connection()
+# ---------- INSERT EXAM ----------
+
+
+def insert_exam(module_id, salle_id, prof_id, date_exam, heure_debut, duree_minutes, conn=None, commit=True):
+    if conn is None:
+        conn = get_connection()
+        close_after = True
+    else:
+        close_after = False
+
     cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO examens (module_id, salle_id, prof_id, date_exam, heure_debut, duree_minutes)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """, (module_id, salle_id, prof_id, date_exam, heure_debut, duree_minutes))
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        cur.execute("""
+            INSERT INTO examens (module_id, salle_id, prof_id, date_exam, heure_debut, duree_minutes)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (module_id, salle_id, prof_id, date_exam, heure_debut, duree_minutes))
+        
+        exam_id = cur.fetchone()[0]     # get the generated id
+        if commit:
+            conn.commit()
+        # Removed print for performance
+        return exam_id                  # ← return integer id, not True
+
+    except psycopg2.errors.UniqueViolation:
+        if commit:
+            conn.rollback()
+        return None                     # or raise, depending on your logic
+
+    except Exception as e:
+        if commit:
+            conn.rollback()
+        raise e
+
+    finally:
+        cur.close()
+        if close_after:
+            conn.close()
+
+
+def insert_exam_groups(exam_id, student_ids, conn=None, commit=True):
+    if conn is None:
+        conn = get_connection()
+        close_after = True
+    else:
+        close_after = False
+
+    cur = conn.cursor()
+    try:
+        cur.executemany("""
+            INSERT INTO exam_groups (exam_id, student_id)
+            VALUES (%s, %s)
+        """, [(exam_id, sid) for sid in student_ids])
+        if commit:
+            conn.commit()
+        # Removed print for performance
+
+    except Exception as e:
+        if commit:
+            conn.rollback()
+        raise e
+
+    finally:
+        cur.close()
+        if close_after:
+            conn.close()

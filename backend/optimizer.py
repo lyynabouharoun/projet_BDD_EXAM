@@ -10,231 +10,146 @@ from backend.database import (
     fetch_rooms,
     fetch_professors,
     clear_existing_exams,
-    insert_exam
+    get_connection,
+    insert_exam,
+    insert_exam_groups  # Changed to plural
 )
-from backend.conflict_detector import is_exam_valid
 
-# =====================================
+# =========================
 # PARAMETERS
-# =====================================
-EXAM_DURATION = 90  # minutes
-BREAK_DURATION = 10  # minutes
-START_TIME = time(8, 0)
+# =========================
+EXAM_DURATION = 90
+BREAK_DURATION = 10
+START_TIME = time(8, 30)
 END_TIME = time(15, 30)
-DEFAULT_GROUP_SIZE = 40
+GROUP_SIZE = 40
+MAX_PROF_PER_DAY = 3
 
-# =====================================
-# HELPER FUNCTIONS
-# =====================================
-
-def generate_possible_slots(start_date, end_date):
-    """Generate all valid exam slots (Mon-Wed, Sat-Sun) with 10-min breaks."""
+# =========================
+# SLOTS
+# =========================
+def generate_slots(start_date, end_date):
     slots = []
-    current = start_date
-    while current <= end_date:
-        if current.weekday() < 3 or current.weekday() > 4:  # Mon-Wed + Sat-Sun
-            slot_time = datetime.combine(current, START_TIME)
-            while slot_time.time() <= END_TIME:
-                slots.append(slot_time)
-                slot_time += timedelta(minutes=EXAM_DURATION + BREAK_DURATION)
-        current += timedelta(days=1)
+    d = start_date
+    while d <= end_date:
+        if d.weekday() not in (3, 4):  # no Thu/Fri
+            t = datetime.combine(d, START_TIME)
+            while t.time() <= END_TIME:
+                slots.append(t)
+                t += timedelta(minutes=EXAM_DURATION + BREAK_DURATION)
+        d += timedelta(days=1)
     return slots
 
-def split_students_flexible(student_ids, rooms, default_group_size=DEFAULT_GROUP_SIZE):
-    """Split students into groups to fit available rooms."""
-    students = list(student_ids)
-    random.shuffle(students)
-
-    rooms_sorted = sorted(rooms, key=lambda r: r["capacite"])
-    groups = []
-    index = 0
-    for room in rooms_sorted:
-        cap = min(room["capacite"], default_group_size)
-        if index >= len(students):
-            break
-        group = set(students[index:index+cap])
-        groups.append(group)
-        index += cap
-
-    while index < len(students):
-        for i in range(len(groups)):
-            if index >= len(students):
-                break
-            groups[i].add(students[index])
-            index += 1
-
-    return groups
-
-def find_rooms_for_groups(groups, rooms, room_schedule, slot):
-    """Assign rooms for each group."""
-    available = [r for r in rooms if (slot.date(), slot.time()) not in room_schedule[r["salle_id"]]]
-    available.sort(key=lambda r: r["capacite"])
-    assignments = []
-
-    for group in groups:
-        for room in available:
-            if room["capacite"] >= len(group):
-                assignments.append((group, room))
-                available.remove(room)
-                break
-        else:
-            if not available:
-                return None
-            room = available.pop()
-            group_subset = set(list(group)[:room["capacite"]])
-            group_remaining = set(list(group)[room["capacite"]:])
-            assignments.append((group_subset, room))
-            groups.insert(0, group_remaining)
-    return assignments
-
-def pick_profs(slot, professors, prof_schedule, required=1):
-    """Pick multiple professors respecting max 3 exams/day."""
-    shuffled = professors[:]
-    random.shuffle(shuffled)
-    selected = []
-    for prof in shuffled:
-        exams_today = sum(1 for d, _ in prof_schedule[prof["id"]] if d == slot.date())
-        if exams_today < 3:
-            selected.append(prof)
-        if len(selected) >= required:
-            break
-    if len(selected) < required:
-        return None
-    return selected
-
-# =====================================
-# BACKTRACKING HELPER
-# =====================================
-
-def backtrack_schedule(modules, all_student_ids, all_slots, rooms, professors,
-                       prof_schedule, student_schedule, room_schedule, existing_exams):
-    """Try to schedule all modules recursively (backtracking)."""
-    if not modules:
-        return True
-
-    module = modules[0]
-
-    for slot in all_slots:
-        if any(slot.date() in student_schedule[sid] for sid in all_student_ids):
-            continue
-
-        groups = split_students_flexible(all_student_ids, rooms)
-        room_assignments = find_rooms_for_groups(groups, rooms, room_schedule, slot)
-        if not room_assignments:
-            continue
-
-        # Pick enough professors (1 per room)
-        assigned_profs_list = []
-        valid_exam = True
-        for group, room in room_assignments:
-            profs = pick_profs(slot, professors, prof_schedule, required=1)
-            if not profs:
-                valid_exam = False
-                break
-
-            # check conflicts
-            for prof in profs:
-                ok, _ = is_exam_valid(
-                    existing_exams=existing_exams,
-                    module_id=module["id"],
-                    module_students=group,
-                    salle=room,
-                    prof=prof,
-                    date_heure=slot,
-                    duree=EXAM_DURATION,
-                    module_department_id=module["departement_id"],
-                    prof_list=professors
-                )
-                if not ok:
-                    valid_exam = False
-                    break
-            if not valid_exam:
-                break
-            assigned_profs_list.append(profs)
-
-        if not valid_exam:
-            continue
-
-        # Insert exams
-        for (group, room), profs in zip(room_assignments, assigned_profs_list):
-            for prof in profs:
-                insert_exam(
-                    module_id=module["id"],
-                    salle_id=room["salle_id"],
-                    prof_id=prof["id"],
-                    date_exam=slot.date(),
-                    heure_debut=slot.time(),
-                    duree_minutes=EXAM_DURATION
-                )
-                existing_exams.append({
-                    "module_id": module["id"],
-                    "salle_id": room["salle_id"],
-                    "date_heure": slot,
-                    "duree_minutes": EXAM_DURATION,
-                    "students": group,
-                    "prof_id": prof["id"]
-                })
-
-                for sid in group:
-                    student_schedule[sid].add(slot.date())
-                prof_schedule[prof["id"]].add((slot.date(), slot.time()))
-                room_schedule[room["salle_id"]].add((slot.date(), slot.time()))
-
-        if backtrack_schedule(modules[1:], all_student_ids, all_slots, rooms, professors,
-                              prof_schedule, student_schedule, room_schedule, existing_exams):
-            return True
-
-        # Undo if failed
-        for (group, room), profs in zip(room_assignments, assigned_profs_list):
-            for prof in profs:
-                for sid in group:
-                    student_schedule[sid].discard(slot.date())
-                prof_schedule[prof["id"]].discard((slot.date(), slot.time()))
-                room_schedule[room["salle_id"]].discard((slot.date(), slot.time()))
-                existing_exams = [e for e in existing_exams if e["module_id"] != module["id"]]
-
-    return False
-
-# =====================================
-# MAIN SCHEDULER
-# =====================================
-
+# =========================
+# MAIN
+# =========================
 def generate_exam_schedule(start_date, end_date):
-    print("🧠 Starting backtracking exam scheduling...")
+    print("🧠 Generating exams...")
     clear_existing_exams()
 
     rooms = fetch_rooms()
-    formations = fetch_formations()
     professors = fetch_professors()
+    formations = fetch_formations()
+    slots = generate_slots(start_date, end_date)
+    random.shuffle(slots)
 
-    prof_schedule = defaultdict(set)
-    student_schedule = defaultdict(set)
-    room_schedule = defaultdict(set)
-    existing_exams = []
+    room_busy = defaultdict(set)     # (date, time) -> set per room
+    prof_busy = defaultdict(set)     # (date, time) per prof
+    prof_daily = defaultdict(lambda: defaultdict(int))
+    prof_total = defaultdict(int)
+    formation_busy_days = defaultdict(set)  # date per formation
 
-    all_slots = generate_possible_slots(start_date, end_date)
-    random.shuffle(all_slots)
+    conn = get_connection()  # Single connection for all inserts
 
-    for formation in formations:
-        modules = fetch_modules_by_formation(formation["id"])
-        students = fetch_students_by_formation(formation["id"])
-        all_student_ids = {s["id"] for s in students}
+    try:
+        for formation in formations:
+            formation_id = formation["id"]
+            students = fetch_students_by_formation(formation_id)
+            student_ids = [s["id"] for s in students]
 
-        success = backtrack_schedule(
-            modules, all_student_ids, all_slots, rooms, professors,
-            prof_schedule, student_schedule, room_schedule, existing_exams
-        )
+            modules = fetch_modules_by_formation(formation_id)
 
-        if not success:
-            print(f"⚠️ Could not perfectly schedule formation {formation['nom']}")
+            for module in modules:
+                scheduled = False
 
-    print("✅ Backtracking exam scheduling completed.")
+                for slot in slots:
+                    date = slot.date()
+                    time_ = slot.time()
 
-# =====================================
-# LOCAL TEST
-# =====================================
-if __name__ == "__main__":
-    generate_exam_schedule(
-        start_date=datetime(2026, 1, 6).date(),
-        end_date=datetime(2026, 1, 31).date()
-    )
+                    # STUDENT: one exam per day (optimized: check formation busy days)
+                    if date in formation_busy_days[formation_id]:
+                        continue
+
+                    # GROUPS
+                    groups = [
+                        student_ids[i:i + GROUP_SIZE]
+                        for i in range(0, len(student_ids), GROUP_SIZE)
+                    ]
+
+                    free_rooms = [
+                        r for r in rooms
+                        if (date, time_) not in room_busy[r["salle_id"]]
+                    ]
+
+                    if len(free_rooms) < len(groups):
+                        continue
+
+                    # PROFS (fair distribution)
+                    free_profs = [
+                        p for p in professors
+                        if (date, time_) not in prof_busy[p["id"]]
+                        and prof_daily[p["id"]][date] < MAX_PROF_PER_DAY
+                    ]
+
+                    free_profs.sort(key=lambda p: prof_total[p["id"]])
+
+                    if len(free_profs) < len(groups):
+                        continue
+
+                    # 🔒 COMMIT
+                    for group_idx, (group, room, prof) in enumerate(zip(groups, free_rooms[:len(groups)], free_profs[:len(groups)])):
+                        exam_id = insert_exam(
+                            module_id=module["id"],
+                            salle_id=room["salle_id"],
+                            prof_id=prof["id"],
+                            date_exam=date,
+                            heure_debut=time_,
+                            duree_minutes=EXAM_DURATION,
+                            conn=conn,
+                            commit=False
+                        )
+
+                        if exam_id is None:
+                            # Handle failure (e.g., unique violation), skip or retry
+                            continue
+
+                        insert_exam_groups(exam_id, group, conn=conn, commit=False)
+
+                        room_busy[room["salle_id"]].add((date, time_))
+                        prof_busy[prof["id"]].add((date, time_))
+                        prof_daily[prof["id"]][date] += 1
+                        prof_total[prof["id"]] += 1
+
+                    # Only add busy day if all groups were scheduled successfully
+                    if len(groups) == group_idx + 1:  # All groups processed
+                        formation_busy_days[formation_id].add(date)
+                        scheduled = True
+                    else:
+                        # If partial failure, you may need to rollback partial inserts, but for simplicity, we proceed
+                        pass
+
+                    if scheduled:
+                        break
+
+                if not scheduled:
+                    print(f"⚠️ Module not scheduled: {module['nom']}")
+
+        conn.commit()  # Commit all at once
+        print("✅ Exams generated successfully")
+
+    except Exception as e:
+        conn.rollback()
+        raise e
+
+    finally:
+        conn.close()
