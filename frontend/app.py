@@ -3,9 +3,24 @@ import sys
 import os
 import psycopg2
 
-# Connect to the database using the secret
+import os
+import psycopg2
+import streamlit as st
+
 try:
-    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    if os.environ.get("DATABASE_URL"):
+        # Cloud deployment
+        conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    else:
+        # Local testing
+        DB_CONFIG = {
+            "dbname": "num_exam",
+            "user": "postgres",
+            "password": "lyna2003",
+            "host": "localhost",
+            "port": "5432"
+        }
+        conn = psycopg2.connect(**DB_CONFIG)
     st.success("Connected to the database!")
 except Exception as e:
     st.error(f"Database connection failed: {e}")
@@ -40,4 +55,5 @@ else:
         prof_dashboard(user)
     else:
         st.error("⚠️ Unknown role. Contact admin.")
+
 
