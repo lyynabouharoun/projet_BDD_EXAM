@@ -1,6 +1,14 @@
 import streamlit as st
 import sys
 import os
+import psycopg2
+
+# Connect to the database using the secret
+try:
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    st.success("Connected to the database!")
+except Exception as e:
+    st.error(f"Database connection failed: {e}")
 
 # Add backend to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -32,3 +40,4 @@ else:
         prof_dashboard(user)
     else:
         st.error("⚠️ Unknown role. Contact admin.")
+
